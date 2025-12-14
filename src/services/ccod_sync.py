@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Generator, TextIO
 
 import httpx
+from psycopg import sql
 
 from src.db.connection import get_connection
 from src.utils.config import settings
@@ -18,12 +19,22 @@ logger = logging.getLogger(__name__)
 
 CCOD_URL = "https://use-land-property-data.service.gov.uk/datasets/ccod/download"
 
+# Column mapping from CSV headers to database columns
+CCOD_COLUMNS = [
+    ("Title Number", "title_number"),
+    ("Property Address", "property_address"),
+    ("Proprietor Name (1)", "company_name"),
+    ("Company Registration No. (1)", "company_number"),
+    ("Tenure", "tenure"),
+    ("Date Proprietor Added", "date_proprietor_added"),
+]
+
 
 class CCODSyncService:
     """Syncs CCOD data from Land Registry.
 
     The CCOD dataset is several GB in size, so we stream it to disk
-    and process it in chunks to avoid memory exhaustion.
+    and process it using PostgreSQL COPY for 10-100x faster bulk inserts.
     """
 
     def download_ccod(self, dest_path: Path) -> None:
@@ -70,57 +81,114 @@ class CCODSyncService:
                 # Wrap in TextIOWrapper for csv.DictReader
                 yield io.TextIOWrapper(csv_file, encoding="utf-8")
 
-    def load_from_zip(self, zip_path: Path) -> int:
-        """Load CCOD data from zip file directly into PostgreSQL."""
+    def _row_generator(
+        self, csv_file: TextIO
+    ) -> Generator[tuple[int, tuple], None, None]:
+        """Generate rows from CSV file for COPY command."""
+        reader = csv.DictReader(csv_file)
+        count = 0
+
+        for row in reader:
+            count += 1
+            yield count, tuple(row.get(csv_col) or None for csv_col, _ in CCOD_COLUMNS)
+
+    def load_from_zip_with_copy(self, zip_path: Path) -> int:
+        """Load CCOD data using PostgreSQL COPY for maximum performance.
+
+        COPY is 10-100x faster than INSERT for bulk loading as it:
+        - Bypasses SQL parsing overhead
+        - Uses binary protocol
+        - Batches WAL writes
+        """
         rows_processed = 0
+        db_columns = [db_col for _, db_col in CCOD_COLUMNS]
 
         with self.stream_csv_from_zip(zip_path) as csv_file:
-            reader = csv.DictReader(csv_file)
-
             with get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Truncate and reload
+                    # Use a staging table for atomic swap
+                    logger.info("Creating staging table...")
+                    cur.execute("""
+                        CREATE TEMP TABLE ccod_staging (LIKE ccod_properties)
+                        ON COMMIT DROP
+                    """)
+
+                    # Use COPY for bulk insert into staging
+                    logger.info("Loading data with COPY...")
+                    copy_sql = sql.SQL("COPY ccod_staging ({}) FROM STDIN").format(
+                        sql.SQL(", ").join(sql.Identifier(col) for col in db_columns)
+                    )
+
+                    with cur.copy(copy_sql) as copy:
+                        for count, row in self._row_generator(csv_file):
+                            copy.write_row(row)
+                            if count % 100000 == 0:
+                                logger.info("Loaded %d rows...", count)
+                        rows_processed = count
+
+                    # Atomic swap: truncate and insert from staging
+                    logger.info("Swapping data into main table...")
+                    cur.execute("TRUNCATE TABLE ccod_properties")
+                    cur.execute(f"""
+                        INSERT INTO ccod_properties ({', '.join(db_columns)})
+                        SELECT {', '.join(db_columns)} FROM ccod_staging
+                    """)
+
+                    conn.commit()
+
+        return rows_processed
+
+    def load_from_zip(self, zip_path: Path) -> int:
+        """Load CCOD data from zip file directly into PostgreSQL.
+
+        Uses COPY command for 10-100x faster bulk inserts compared to INSERT.
+        Falls back to batch INSERT if COPY fails.
+        """
+        try:
+            return self.load_from_zip_with_copy(zip_path)
+        except Exception as e:
+            logger.warning("COPY failed (%s), falling back to batch INSERT", e)
+            return self._load_from_zip_batch(zip_path)
+
+    def _load_from_zip_batch(self, zip_path: Path) -> int:
+        """Fallback: Load CCOD data using batch INSERT."""
+        rows_processed = 0
+        db_columns = [db_col for _, db_col in CCOD_COLUMNS]
+
+        with self.stream_csv_from_zip(zip_path) as csv_file:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
                     cur.execute("TRUNCATE TABLE ccod_properties")
 
                     batch = []
-                    batch_size = 5000  # Larger batch for bulk load
+                    batch_size = 10000
 
-                    for row in reader:
-                        batch.append(
-                            (
-                                row.get("Title Number"),
-                                row.get("Property Address"),
-                                row.get("Proprietor Name (1)"),
-                                row.get("Company Registration No. (1)"),
-                                row.get("Tenure"),
-                                row.get("Date Proprietor Added"),
-                            )
-                        )
+                    for count, row in self._row_generator(csv_file):
+                        batch.append(row)
 
                         if len(batch) >= batch_size:
-                            self._insert_batch(cur, batch)
+                            self._insert_batch(cur, batch, db_columns)
                             rows_processed += len(batch)
                             if rows_processed % 100000 == 0:
                                 logger.info("Processed %d rows", rows_processed)
                             batch = []
 
                     if batch:
-                        self._insert_batch(cur, batch)
+                        self._insert_batch(cur, batch, db_columns)
                         rows_processed += len(batch)
 
                     conn.commit()
 
         return rows_processed
 
-    def _insert_batch(self, cursor, batch: list[tuple]):
-        """Insert a batch of records."""
+    def _insert_batch(self, cursor, batch: list[tuple], columns: list[str]):
+        """Insert a batch of records using executemany."""
+        placeholders = ", ".join(["%s"] * len(columns))
+        cols = ", ".join(columns)
         cursor.executemany(
-            """
-            INSERT INTO ccod_properties (
-                title_number, property_address, company_name,
-                company_number, tenure, date_proprietor_added
-            )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            f"""
+            INSERT INTO ccod_properties ({cols})
+            VALUES ({placeholders})
             ON CONFLICT (title_number) DO UPDATE SET
                 property_address = EXCLUDED.property_address,
                 company_name = EXCLUDED.company_name,

@@ -95,8 +95,8 @@ def agent_match(state: EnrichmentState) -> EnrichmentState:
     state.messages = state.messages + [response]
 
     # Parse response - use candidates from state to avoid re-fetching
+    content = response.content
     try:
-        content = response.content
         # Extract JSON from response
         if "{" in content:
             json_str = content[content.index("{"):content.rindex("}") + 1]
@@ -108,8 +108,19 @@ def agent_match(state: EnrichmentState) -> EnrichmentState:
                 if 0 <= idx < len(candidates):
                     state.company_number = candidates[idx].get("company_number")
                     state.match_confidence = result.get("confidence", 0)
+        else:
+            logger.warning(
+                "LLM response missing JSON for company '%s'. Response: %s",
+                state.current_record.company_name if state.current_record else "unknown",
+                content[:500],  # Truncate for logging
+            )
     except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("Failed to parse LLM response: %s", e)
+        logger.warning(
+            "Failed to parse LLM response for company '%s': %s. Response content: %s",
+            state.current_record.company_name if state.current_record else "unknown",
+            e,
+            content[:500],  # Include truncated response for debugging
+        )
 
     return state
 

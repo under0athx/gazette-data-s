@@ -4,8 +4,10 @@ import csv
 import io
 import json
 import logging
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
+
+from dateutil import parser as dateutil_parser
 
 from src.db.models import EnrichedCompany, GazetteRecord
 from src.graph.state import EnrichmentState
@@ -15,25 +17,29 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_date(value: Optional[str]) -> Optional[date]:
-    """Parse date from string, trying multiple formats."""
+    """Parse date from string using dateutil for robust parsing.
+
+    Handles various formats including:
+    - ISO: 2024-01-15
+    - UK: 15/01/2024, 15-01-2024
+    - US: 01/15/2024
+    - Written: 15 January 2024, Jan 15, 2024
+    - Compact: 20240115
+
+    For ambiguous dates (like 01/02/2024), assumes UK format (day first).
+    """
     if not value or not value.strip():
         return None
 
-    formats = [
-        "%Y-%m-%d",  # ISO format
-        "%d/%m/%Y",  # UK format
-        "%d-%m-%Y",  # UK with dashes
-        "%Y%m%d",    # Compact
-    ]
+    cleaned = value.strip()
 
-    for fmt in formats:
-        try:
-            return datetime.strptime(value.strip(), fmt).date()
-        except ValueError:
-            continue
-
-    logger.warning("Could not parse date: %s", value)
-    return None
+    try:
+        # Use dateutil with dayfirst=True for UK date format preference
+        parsed = dateutil_parser.parse(cleaned, dayfirst=True, fuzzy=False)
+        return parsed.date()
+    except (ValueError, TypeError) as e:
+        logger.warning("Could not parse date '%s': %s", value, e)
+        return None
 
 
 class EnrichmentService:
