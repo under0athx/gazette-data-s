@@ -1,6 +1,6 @@
 import base64
 import json
-from pathlib import Path
+import logging
 from typing import Optional
 
 from google.auth.transport.requests import Request
@@ -10,7 +10,10 @@ from googleapiclient.discovery import build
 
 from src.utils.config import settings
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+logger = logging.getLogger(__name__)
+
+# Need modify scope to mark emails as read
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 
 class GmailClient:
@@ -81,3 +84,15 @@ class GmailClient:
                     return self.get_attachment(message_id, attachment_id)
 
         return None
+
+    def mark_as_read(self, message_id: str) -> None:
+        """Mark a message as read by removing UNREAD label."""
+        try:
+            self.service.users().messages().modify(
+                userId="me",
+                id=message_id,
+                body={"removeLabelIds": ["UNREAD"]},
+            ).execute()
+            logger.info("Marked message %s as read", message_id)
+        except Exception as e:
+            logger.error("Failed to mark message %s as read: %s", message_id, e)

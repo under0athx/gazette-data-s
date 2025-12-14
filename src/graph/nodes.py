@@ -1,5 +1,8 @@
 """Node functions for the enrichment graph."""
 
+import json
+import logging
+
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -8,11 +11,19 @@ from src.db.connection import get_connection
 from src.db.models import EnrichedCompany
 from src.graph.state import EnrichmentState
 from src.utils.config import settings
-from src.utils.name_matching import names_match, normalize_company_name
+from src.utils.name_matching import names_match
 
-# Initialize clients
-ch_client = CompaniesHouseClient()
-llm = ChatAnthropic(model="claude-sonnet-4-20250514", api_key=settings.anthropic_api_key)
+logger = logging.getLogger(__name__)
+
+
+def _get_ch_client() -> CompaniesHouseClient:
+    """Get Companies House client (lazy initialization)."""
+    return CompaniesHouseClient()
+
+
+def _get_llm() -> ChatAnthropic:
+    """Get LLM client (lazy initialization)."""
+    return ChatAnthropic(model="claude-sonnet-4-20250514", api_key=settings.anthropic_api_key)
 
 
 def get_next_record(state: EnrichmentState) -> EnrichmentState:
@@ -26,6 +37,7 @@ def get_next_record(state: EnrichmentState) -> EnrichmentState:
     state.insolvency_details = None
     state.properties = []
     state.match_confidence = 0.0
+    state.search_candidates = []
 
     return state
 
@@ -36,11 +48,16 @@ def search_companies_house(state: EnrichmentState) -> EnrichmentState:
         return state
 
     company_name = state.current_record.company_name
-    candidates = ch_client.search_companies(company_name)
+
+    with _get_ch_client() as ch_client:
+        candidates = ch_client.search_companies(company_name)
 
     if not candidates:
         state.match_confidence = 0.0
         return state
+
+    # Store candidates in state to avoid re-fetching in agent_match
+    state.search_candidates = candidates
 
     # Check for exact match first
     for candidate in candidates:
@@ -50,18 +67,19 @@ def search_companies_house(state: EnrichmentState) -> EnrichmentState:
             return state
 
     # Store candidates for agent matching
-    state.messages = [
-        SystemMessage(content="You are helping match company names between The Gazette and Companies House."),
-        HumanMessage(content=f"""
-Match this Gazette company to the best Companies House result.
+    system_msg = "You are helping match company names between The Gazette and Companies House."
+    user_prompt = f"""Match this Gazette company to the best Companies House result.
 
 Gazette name: {company_name}
 
 Candidates:
 {_format_candidates(candidates)}
 
-Respond with JSON: {{"index": <0-based index or -1 if no match>, "confidence": <0-100>}}
-"""),
+Respond with JSON: {{"index": <0-based index or -1 if no match>, "confidence": <0-100>}}"""
+
+    state.messages = [
+        SystemMessage(content=system_msg),
+        HumanMessage(content=user_prompt),
     ]
 
     return state
@@ -72,11 +90,11 @@ def agent_match(state: EnrichmentState) -> EnrichmentState:
     if state.match_confidence == 100.0 or not state.messages:
         return state
 
+    llm = _get_llm()
     response = llm.invoke(state.messages)
     state.messages = state.messages + [response]
 
-    # Parse response
-    import json
+    # Parse response - use candidates from state to avoid re-fetching
     try:
         content = response.content
         # Extract JSON from response
@@ -85,13 +103,13 @@ def agent_match(state: EnrichmentState) -> EnrichmentState:
             result = json.loads(json_str)
 
             if result.get("index", -1) >= 0:
-                candidates = ch_client.search_companies(state.current_record.company_name)
+                candidates = state.search_candidates or []
                 idx = result["index"]
                 if 0 <= idx < len(candidates):
                     state.company_number = candidates[idx].get("company_number")
                     state.match_confidence = result.get("confidence", 0)
-    except (json.JSONDecodeError, ValueError):
-        pass
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning("Failed to parse LLM response: %s", e)
 
     return state
 
@@ -101,8 +119,9 @@ def get_company_details(state: EnrichmentState) -> EnrichmentState:
     if not state.company_number:
         return state
 
-    state.company_details = ch_client.get_company(state.company_number)
-    state.insolvency_details = ch_client.get_insolvency(state.company_number)
+    with _get_ch_client() as ch_client:
+        state.company_details = ch_client.get_company(state.company_number)
+        state.insolvency_details = ch_client.get_insolvency(state.company_number)
 
     return state
 
@@ -118,10 +137,11 @@ def lookup_properties(state: EnrichmentState) -> EnrichmentState:
         with conn.cursor() as cur:
             # Try by company number first
             if state.company_number:
-                cur.execute(
-                    "SELECT title_number, property_address FROM ccod_properties WHERE company_number = %s",
-                    (state.company_number,),
-                )
+                query = """
+                    SELECT title_number, property_address
+                    FROM ccod_properties WHERE company_number = %s
+                """
+                cur.execute(query, (state.company_number,))
                 results = cur.fetchall()
                 if results:
                     state.properties = [
@@ -168,10 +188,14 @@ def build_enriched_record(state: EnrichmentState) -> EnrichmentState:
             ip_name = practitioners[0].get("name")
             ip_appointed_date = practitioners[0].get("appointed_on")
 
+    company_status = None
+    if state.company_details:
+        company_status = state.company_details.get("company_status")
+
     enriched = EnrichedCompany(
         company_name=record.company_name,
         company_number=state.company_number,
-        company_status=state.company_details.get("company_status") if state.company_details else None,
+        company_status=company_status,
         insolvency_type=record.insolvency_type,
         ip_name=ip_name,
         ip_appointed_date=ip_appointed_date,

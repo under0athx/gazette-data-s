@@ -24,6 +24,7 @@ class EnrichmentState(BaseModel):
     insolvency_details: Optional[dict] = None
     properties: list[dict] = []
     match_confidence: float = 0.0
+    search_candidates: list[dict] = []  # Cached search results to avoid re-fetching
 
     # Output
     enriched_companies: list[EnrichedCompany] = []
