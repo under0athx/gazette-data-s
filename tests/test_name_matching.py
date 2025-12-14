@@ -1,4 +1,3 @@
-import pytest
 
 from src.utils.name_matching import names_match, normalize_company_name
 

@@ -1,7 +1,9 @@
 """Node functions for the enrichment graph."""
 
+import atexit
 import json
 import logging
+from functools import lru_cache
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -15,15 +17,43 @@ from src.utils.name_matching import names_match
 
 logger = logging.getLogger(__name__)
 
+# Cached client instances - reused across node executions
+_ch_client: CompaniesHouseClient | None = None
+
+
+@lru_cache(maxsize=1)
+def _get_llm() -> ChatAnthropic:
+    """Get cached LLM client.
+
+    Uses lru_cache to ensure only one instance is created and reused
+    across all node executions in the workflow.
+    """
+    return ChatAnthropic(model="claude-sonnet-4-20250514", api_key=settings.anthropic_api_key)
+
 
 def _get_ch_client() -> CompaniesHouseClient:
-    """Get Companies House client (lazy initialization)."""
-    return CompaniesHouseClient()
+    """Get Companies House client with connection reuse.
+
+    Returns a cached client instance for the duration of the process.
+    The client is closed on process exit via atexit handler.
+    """
+    global _ch_client
+    if _ch_client is None:
+        _ch_client = CompaniesHouseClient()
+        # Register cleanup on exit
+        atexit.register(_cleanup_ch_client)
+    return _ch_client
 
 
-def _get_llm() -> ChatAnthropic:
-    """Get LLM client (lazy initialization)."""
-    return ChatAnthropic(model="claude-sonnet-4-20250514", api_key=settings.anthropic_api_key)
+def _cleanup_ch_client() -> None:
+    """Clean up Companies House client on exit."""
+    global _ch_client
+    if _ch_client is not None:
+        try:
+            _ch_client.close()
+        except Exception:
+            pass
+        _ch_client = None
 
 
 def get_next_record(state: EnrichmentState) -> EnrichmentState:
@@ -48,9 +78,8 @@ def search_companies_house(state: EnrichmentState) -> EnrichmentState:
         return state
 
     company_name = state.current_record.company_name
-
-    with _get_ch_client() as ch_client:
-        candidates = ch_client.search_companies(company_name)
+    ch_client = _get_ch_client()
+    candidates = ch_client.search_companies(company_name)
 
     if not candidates:
         state.match_confidence = 0.0
@@ -130,9 +159,9 @@ def get_company_details(state: EnrichmentState) -> EnrichmentState:
     if not state.company_number:
         return state
 
-    with _get_ch_client() as ch_client:
-        state.company_details = ch_client.get_company(state.company_number)
-        state.insolvency_details = ch_client.get_insolvency(state.company_number)
+    ch_client = _get_ch_client()
+    state.company_details = ch_client.get_company(state.company_number)
+    state.insolvency_details = ch_client.get_insolvency(state.company_number)
 
     return state
 
