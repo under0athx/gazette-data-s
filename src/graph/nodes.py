@@ -27,8 +27,10 @@ def _get_llm() -> ChatAnthropic:
 
     Uses lru_cache to ensure only one instance is created and reused
     across all node executions in the workflow.
+
+    Model is configurable via LLM_MODEL environment variable.
     """
-    return ChatAnthropic(model="claude-sonnet-4-20250514", api_key=settings.anthropic_api_key)
+    return ChatAnthropic(model=settings.llm_model, api_key=settings.anthropic_api_key)
 
 
 def _get_ch_client() -> CompaniesHouseClient:

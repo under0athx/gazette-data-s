@@ -47,3 +47,51 @@ def close_pool() -> None:
     if _pool is not None:
         _pool.close()
         _pool = None
+
+
+def check_connectivity() -> bool:
+    """Check database connectivity.
+
+    Returns True if database is reachable, False otherwise.
+    Useful for startup health checks and readiness probes.
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def wait_for_database(max_retries: int = 5, retry_interval: float = 2.0) -> bool:
+    """Wait for database to become available.
+
+    Args:
+        max_retries: Maximum number of connection attempts.
+        retry_interval: Seconds to wait between retries.
+
+    Returns:
+        True if database became available, False if all retries exhausted.
+    """
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+
+    for attempt in range(1, max_retries + 1):
+        if check_connectivity():
+            logger.info("Database connection established on attempt %d", attempt)
+            return True
+
+        if attempt < max_retries:
+            logger.warning(
+                "Database not available (attempt %d/%d), retrying in %.1fs...",
+                attempt,
+                max_retries,
+                retry_interval,
+            )
+            time.sleep(retry_interval)
+
+    logger.error("Failed to connect to database after %d attempts", max_retries)
+    return False

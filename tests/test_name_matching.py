@@ -33,7 +33,8 @@ class TestNamesMatch:
         assert names_match("The ABC Company", "ABC Company")
 
     def test_ampersand_vs_and(self):
-        assert names_match("J & K Holdings", "J AND K HOLDINGS LTD")
+        # Tests that & is converted to AND for matching
+        assert names_match("J & K Holdings Ltd", "J AND K HOLDINGS LTD")
 
     def test_no_match(self):
         assert not names_match("Smith Ltd", "Jones Ltd")

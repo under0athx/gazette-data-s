@@ -27,17 +27,36 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
     - Compact: 20240115
 
     For ambiguous dates (like 01/02/2024), assumes UK format (day first).
+
+    Edge cases handled:
+    - Empty/whitespace strings
+    - Future dates (flagged as warning)
+    - Very old dates (before 1900, flagged as warning)
+    - Non-date strings that dateutil might misparse
     """
     if not value or not value.strip():
         return None
 
     cleaned = value.strip()
 
+    # Reject obvious non-dates early
+    if cleaned.lower() in ("n/a", "na", "none", "-", "tbc", "tbd", "unknown"):
+        return None
+
     try:
         # Use dateutil with dayfirst=True for UK date format preference
         parsed = dateutil_parser.parse(cleaned, dayfirst=True, fuzzy=False)
-        return parsed.date()
-    except (ValueError, TypeError) as e:
+        result = parsed.date()
+
+        # Sanity check: flag suspicious dates but still return them
+        today = date.today()
+        if result.year < 1900:
+            logger.warning("Suspiciously old date '%s' parsed as %s", value, result)
+        elif result > today:
+            logger.warning("Future date '%s' parsed as %s", value, result)
+
+        return result
+    except (ValueError, TypeError, OverflowError) as e:
         logger.warning("Could not parse date '%s': %s", value, e)
         return None
 

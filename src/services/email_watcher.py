@@ -1,14 +1,28 @@
 """Email watcher service - polls Gmail for Gazette emails."""
 
 import logging
+import signal
+import sys
+import threading
 import time
 from datetime import datetime
 
 from src.api.gmail import GmailClient
 from src.api.resend_client import ResendClient
+from src.db.connection import close_pool, wait_for_database
 from src.services.enrichment import EnrichmentService
 
 logger = logging.getLogger(__name__)
+
+# Graceful shutdown flag
+_shutdown_event = threading.Event()
+
+
+def _signal_handler(signum: int, frame) -> None:
+    """Handle shutdown signals gracefully."""
+    sig_name = signal.Signals(signum).name
+    logger.info("Received %s signal, initiating graceful shutdown...", sig_name)
+    _shutdown_event.set()
 
 
 class EmailWatcher:
@@ -73,17 +87,34 @@ def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+    # Check database connectivity before starting
+    logger.info("Checking database connectivity...")
+    if not wait_for_database():
+        logger.error("Cannot start email watcher: database not available")
+        sys.exit(1)
+
     watcher = EmailWatcher()
     poll_interval = 300  # 5 minutes
 
     logger.info("Starting email watcher...")
-    while True:
-        try:
-            watcher.poll()
-        except Exception as e:
-            logger.exception("Error polling: %s", e)
+    try:
+        while not _shutdown_event.is_set():
+            try:
+                watcher.poll()
+            except Exception as e:
+                logger.exception("Error polling: %s", e)
 
-        time.sleep(poll_interval)
+            # Use wait() instead of sleep() to respond quickly to shutdown
+            _shutdown_event.wait(timeout=poll_interval)
+    finally:
+        logger.info("Shutting down email watcher...")
+        close_pool()
+        logger.info("Email watcher stopped.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

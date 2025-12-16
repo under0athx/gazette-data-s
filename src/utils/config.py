@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     ccod_gov_uk_credentials: Optional[str] = None
     resend_from_email: Optional[str] = None  # Defaults to onboarding@resend.dev for testing
 
+    # LLM Configuration
+    llm_model: str = "claude-sonnet-4-20250514"  # Default model for company matching
+
     @field_validator("companies_house_api_key", "anthropic_api_key", "resend_api_key")
     @classmethod
     def validate_api_keys(cls, v: str, info) -> str:
@@ -64,9 +67,10 @@ class Settings(BaseSettings):
         """Validate database URL format."""
         if not v or not v.strip():
             raise ValueError("DATABASE_URL must be set")
+        v = v.strip()
         if not v.startswith(("postgresql://", "postgres://")):
             raise ValueError("DATABASE_URL must be a PostgreSQL connection URL")
-        return v.strip()
+        return v
 
     @field_validator("client_email")
     @classmethod
