@@ -125,33 +125,61 @@ def agent_match(state: EnrichmentState) -> EnrichmentState:
 
     # Parse response - use candidates from state to avoid re-fetching
     content = response.content
-    try:
-        # Extract JSON from response
-        if "{" in content:
-            json_str = content[content.index("{"):content.rindex("}") + 1]
-            result = json.loads(json_str)
+    company_name = state.current_record.company_name if state.current_record else "unknown"
 
-            if result.get("index", -1) >= 0:
-                candidates = state.search_candidates or []
-                idx = result["index"]
-                if 0 <= idx < len(candidates):
-                    state.company_number = candidates[idx].get("company_number")
-                    state.match_confidence = result.get("confidence", 0)
-        else:
+    try:
+        # Safely extract JSON from response
+        json_str = _extract_json_from_response(content)
+        if json_str is None:
             logger.warning(
                 "LLM response missing JSON for company '%s'. Response: %s",
-                state.current_record.company_name if state.current_record else "unknown",
-                content[:500],  # Truncate for logging
+                company_name,
+                content[:500],
             )
-    except (json.JSONDecodeError, ValueError) as e:
+            return state
+
+        result = json.loads(json_str)
+
+        if result.get("index", -1) >= 0:
+            candidates = state.search_candidates or []
+            idx = result["index"]
+            if 0 <= idx < len(candidates):
+                state.company_number = candidates[idx].get("company_number")
+                state.match_confidence = result.get("confidence", 0)
+    except json.JSONDecodeError as e:
         logger.warning(
-            "Failed to parse LLM response for company '%s': %s. Response content: %s",
-            state.current_record.company_name if state.current_record else "unknown",
+            "Failed to parse LLM JSON for company '%s': %s. Response content: %s",
+            company_name,
             e,
-            content[:500],  # Include truncated response for debugging
+            content[:500],
         )
 
     return state
+
+
+def _extract_json_from_response(content: str) -> str | None:
+    """Safely extract JSON object from LLM response.
+
+    Returns the first complete JSON object found, or None if not found.
+    Handles cases where braces are missing or unbalanced.
+    """
+    if not content or "{" not in content:
+        return None
+
+    try:
+        start_idx = content.index("{")
+    except ValueError:
+        return None
+
+    try:
+        end_idx = content.rindex("}")
+    except ValueError:
+        return None
+
+    if end_idx <= start_idx:
+        return None
+
+    return content[start_idx:end_idx + 1]
 
 
 def get_company_details(state: EnrichmentState) -> EnrichmentState:
@@ -167,45 +195,58 @@ def get_company_details(state: EnrichmentState) -> EnrichmentState:
 
 
 def lookup_properties(state: EnrichmentState) -> EnrichmentState:
-    """Look up properties in CCOD database."""
+    """Look up properties in CCOD database.
+
+    Handles database connection failures gracefully - logs error and continues
+    with empty properties list rather than crashing the workflow.
+    """
     if not state.current_record:
         return state
 
     company_name = state.current_record.company_name
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            # Try by company number first
-            if state.company_number:
-                query = """
-                    SELECT title_number, property_address
-                    FROM ccod_properties WHERE company_number = %s
-                """
-                cur.execute(query, (state.company_number,))
-                results = cur.fetchall()
-                if results:
-                    state.properties = [
-                        {"title": r["title_number"], "address": r["property_address"]}
-                        for r in results
-                    ]
-                    return state
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Try by company number first
+                if state.company_number:
+                    query = """
+                        SELECT title_number, property_address
+                        FROM ccod_properties WHERE company_number = %s
+                    """
+                    cur.execute(query, (state.company_number,))
+                    results = cur.fetchall()
+                    if results:
+                        state.properties = [
+                            {"title": r["title_number"], "address": r["property_address"]}
+                            for r in results
+                        ]
+                        return state
 
-            # Fallback to fuzzy name match
-            cur.execute(
-                """
-                SELECT title_number, property_address
-                FROM ccod_properties
-                WHERE similarity(company_name, %s) > 0.8
-                ORDER BY similarity(company_name, %s) DESC
-                LIMIT 100
-                """,
-                (company_name, company_name),
-            )
-            results = cur.fetchall()
-            state.properties = [
-                {"title": r["title_number"], "address": r["property_address"]}
-                for r in results
-            ]
+                # Fallback to fuzzy name match
+                cur.execute(
+                    """
+                    SELECT title_number, property_address
+                    FROM ccod_properties
+                    WHERE similarity(company_name, %s) > 0.8
+                    ORDER BY similarity(company_name, %s) DESC
+                    LIMIT 100
+                    """,
+                    (company_name, company_name),
+                )
+                results = cur.fetchall()
+                state.properties = [
+                    {"title": r["title_number"], "address": r["property_address"]}
+                    for r in results
+                ]
+    except Exception as e:
+        logger.error(
+            "Database error looking up properties for '%s': %s",
+            company_name,
+            e,
+        )
+        # Continue with empty properties - don't crash workflow
+        state.properties = []
 
     return state
 

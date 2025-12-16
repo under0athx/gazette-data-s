@@ -182,11 +182,16 @@ class CCODSyncService:
         return rows_processed
 
     def _insert_batch(self, cursor, batch: list[tuple], columns: list[str]):
-        """Insert a batch of records using executemany."""
-        placeholders = ", ".join(["%s"] * len(columns))
-        cols = ", ".join(columns)
-        cursor.executemany(
-            f"""
+        """Insert a batch of records using executemany.
+
+        Uses psycopg.sql for safe SQL composition to prevent SQL injection.
+        """
+        # Build column list safely using sql.Identifier
+        cols = sql.SQL(", ").join(sql.Identifier(col) for col in columns)
+        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in columns)
+
+        # Build the full query with safe identifiers
+        query = sql.SQL("""
             INSERT INTO ccod_properties ({cols})
             VALUES ({placeholders})
             ON CONFLICT (title_number) DO UPDATE SET
@@ -196,9 +201,9 @@ class CCODSyncService:
                 tenure = EXCLUDED.tenure,
                 date_proprietor_added = EXCLUDED.date_proprietor_added,
                 updated_at = NOW()
-            """,
-            batch,
-        )
+        """).format(cols=cols, placeholders=placeholders)
+
+        cursor.executemany(query, batch)
 
     def sync(self):
         """Full sync: download, stream, and load."""
