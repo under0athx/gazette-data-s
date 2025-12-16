@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import logging
+import re
 from datetime import date
 from typing import Optional
 
@@ -14,6 +15,45 @@ from src.graph.state import EnrichmentState
 from src.graph.workflow import enrichment_graph
 
 logger = logging.getLogger(__name__)
+
+# Pattern to match partial dates like "2024-01" (year-month only)
+PARTIAL_DATE_PATTERN = re.compile(r"^\d{4}-\d{1,2}$")
+
+# CSV output field names - single source of truth
+CSV_FIELDNAMES = [
+    "company_name",
+    "company_number",
+    "company_status",
+    "insolvency_type",
+    "ip_name",
+    "ip_appointed_date",
+    "property_count",
+    "properties",
+    "match_confidence",
+]
+
+# Characters that can trigger formula injection in spreadsheet applications
+CSV_INJECTION_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _get_optional_field(row: dict, field_name: str) -> Optional[str]:
+    """Extract and clean an optional field from a CSV row.
+
+    Returns None for empty/whitespace-only values.
+    """
+    value = row.get(field_name, "").strip()
+    return value if value else None
+
+
+def _sanitize_csv_value(value: str) -> str:
+    """Sanitize a string value to prevent CSV injection attacks.
+
+    Prefixes values starting with formula-triggering characters with a
+    single quote to prevent Excel/Sheets from interpreting them as formulas.
+    """
+    if value and value.startswith(CSV_INJECTION_CHARS):
+        return f"'{value}"
+    return value
 
 
 def _parse_date(value: Optional[str]) -> Optional[date]:
@@ -41,6 +81,10 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
 
     # Reject obvious non-dates early
     if cleaned.lower() in ("n/a", "na", "none", "-", "tbc", "tbd", "unknown"):
+        return None
+
+    # Reject partial dates (year-month only like "2024-01")
+    if PARTIAL_DATE_PATTERN.match(cleaned):
         return None
 
     try:
@@ -78,10 +122,10 @@ class EnrichmentService:
             records.append(
                 GazetteRecord(
                     company_name=company_name,
-                    insolvency_type=row.get("insolvency_type"),
+                    insolvency_type=_get_optional_field(row, "insolvency_type"),
                     notice_date=_parse_date(row.get("notice_date")),
-                    ip_name=row.get("ip_name"),
-                    ip_firm=row.get("ip_firm"),
+                    ip_name=_get_optional_field(row, "ip_name"),
+                    ip_firm=_get_optional_field(row, "ip_firm"),
                 )
             )
         return records
@@ -93,21 +137,12 @@ class EnrichmentService:
         return final_state["enriched_companies"]
 
     def to_csv(self, enriched: list[EnrichedCompany]) -> bytes:
-        """Convert enriched records to CSV."""
+        """Convert enriched records to CSV.
+
+        Includes CSV injection protection for string fields.
+        """
         output = io.StringIO()
-        writer = csv.DictWriter(
-            output,
-            fieldnames=[
-                "company_name",
-                "company_number",
-                "company_status",
-                "insolvency_type",
-                "ip_name",
-                "ip_appointed_date",
-                "property_count",
-                "properties",
-            ],
-        )
+        writer = csv.DictWriter(output, fieldnames=CSV_FIELDNAMES)
         writer.writeheader()
         for record in enriched:
             row = record.model_dump()
@@ -117,6 +152,10 @@ class EnrichmentService:
             # Format date as ISO string
             if row.get("ip_appointed_date"):
                 row["ip_appointed_date"] = row["ip_appointed_date"].isoformat()
+            # Sanitize string fields to prevent CSV injection
+            for field in ("company_name", "company_status", "insolvency_type", "ip_name"):
+                if row.get(field):
+                    row[field] = _sanitize_csv_value(row[field])
             writer.writerow(row)
         return output.getvalue().encode("utf-8")
 

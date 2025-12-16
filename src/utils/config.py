@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     resend_from_email: Optional[str] = None  # Defaults to onboarding@resend.dev for testing
 
     # LLM Configuration
-    llm_model: str = "claude-sonnet-4-20250514"  # Default model for company matching
+    llm_model: str = "claude-sonnet-4-5"  # Default model for company matching
 
     @field_validator("companies_house_api_key", "anthropic_api_key", "resend_api_key")
     @classmethod

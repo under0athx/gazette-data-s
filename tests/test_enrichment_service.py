@@ -110,6 +110,10 @@ class TestToCSV:
 
     def test_to_csv_properties_as_json(self):
         """Test that properties are serialized as JSON string."""
+        import csv as csv_module
+        import io
+        import json
+
         from src.db.models import EnrichedCompany
 
         enriched = [
@@ -127,10 +131,14 @@ class TestToCSV:
         lines = csv_text.strip().split("\n")
         assert len(lines) == 2  # header + 1 row
 
-        # The properties column should contain valid JSON
-        data_line = lines[1]
-        # Properties field should be JSON-parseable
-        assert '"title": "ABC123"' in data_line or '"title":"ABC123"' in data_line
+        # Parse the CSV properly to extract the properties field
+        reader = csv_module.DictReader(io.StringIO(csv_text))
+        row = next(reader)
+
+        # Properties field should be valid JSON
+        properties = json.loads(row["properties"])
+        assert len(properties) == 1
+        assert properties[0]["title"] == "ABC123"
 
     def test_to_csv_date_formatting(self):
         """Test that dates are formatted as ISO strings."""
@@ -159,3 +167,128 @@ class TestToCSV:
         lines = csv_text.strip().split("\n")
         assert len(lines) == 1
         assert "company_name" in lines[0]
+
+    def test_to_csv_injection_prevention(self):
+        """Test that CSV injection characters are sanitized."""
+        from src.db.models import EnrichedCompany
+
+        enriched = [
+            EnrichedCompany(
+                company_name="=CMD|'/C calc'!A0",
+                company_status="+1234567890",
+                insolvency_type="-malicious",
+                ip_name="@SUM(1+1)*cmd|' /C calc'!A0",
+                property_count=0,
+                properties=[],
+            )
+        ]
+
+        csv_bytes = self.service.to_csv(enriched)
+        csv_text = csv_bytes.decode("utf-8")
+
+        # Values should be prefixed with single quote to prevent formula execution
+        assert "'=CMD" in csv_text
+        assert "'+1234567890" in csv_text
+        assert "'-malicious" in csv_text
+        assert "'@SUM" in csv_text
+
+    def test_to_csv_normal_values_not_modified(self):
+        """Test that normal values are not affected by sanitization."""
+        from src.db.models import EnrichedCompany
+
+        enriched = [
+            EnrichedCompany(
+                company_name="Acme Ltd",
+                company_status="active",
+                insolvency_type="Liquidation",
+                ip_name="John Smith",
+                property_count=0,
+                properties=[],
+            )
+        ]
+
+        csv_bytes = self.service.to_csv(enriched)
+        csv_text = csv_bytes.decode("utf-8")
+
+        # Normal values should not be prefixed
+        assert "Acme Ltd" in csv_text
+        assert "'Acme" not in csv_text
+
+    def test_to_csv_none_values_handled(self):
+        """Test that None values don't cause errors."""
+        from src.db.models import EnrichedCompany
+
+        enriched = [
+            EnrichedCompany(
+                company_name="Test Ltd",
+                company_number=None,
+                company_status=None,
+                insolvency_type=None,
+                ip_name=None,
+                ip_appointed_date=None,
+                property_count=0,
+                properties=[],
+                match_confidence=None,
+            )
+        ]
+
+        csv_bytes = self.service.to_csv(enriched)
+        csv_text = csv_bytes.decode("utf-8")
+
+        assert "Test Ltd" in csv_text
+
+
+class TestParseGazetteCSVEdgeCases:
+    """Edge case tests for CSV parsing."""
+
+    def setup_method(self):
+        self.service = EnrichmentService()
+
+    def test_unicode_company_names(self):
+        """Test that Unicode characters in company names are handled."""
+        csv_content = b"""company_name,insolvency_type,notice_date,ip_name,ip_firm
+Caf\xc3\xa9 Holdings Ltd,Liquidation,2024-01-15,John Smith,Smith & Co
+"""
+        records = self.service.parse_gazette_csv(csv_content)
+        assert len(records) == 1
+        assert records[0].company_name == "Café Holdings Ltd"
+
+    def test_special_characters_in_fields(self):
+        """Test that special characters like commas and quotes are handled."""
+        csv_content = b'''company_name,insolvency_type,notice_date,ip_name,ip_firm
+"Smith, Jones & Partners Ltd",Liquidation,2024-01-15,"O'Brien, John","O'Brien & Sons"
+'''
+        records = self.service.parse_gazette_csv(csv_content)
+        assert len(records) == 1
+        assert records[0].company_name == "Smith, Jones & Partners Ltd"
+        assert records[0].ip_name == "O'Brien, John"
+
+    def test_whitespace_only_optional_fields(self):
+        """Test that whitespace-only optional fields become None."""
+        csv_content = b"""company_name,insolvency_type,notice_date,ip_name,ip_firm
+Acme Ltd,   ,2024-01-15,   ,
+"""
+        records = self.service.parse_gazette_csv(csv_content)
+        assert len(records) == 1
+        assert records[0].insolvency_type is None
+        assert records[0].ip_name is None
+        assert records[0].ip_firm is None
+
+    def test_empty_csv(self):
+        """Test parsing an empty CSV (headers only)."""
+        csv_content = b"""company_name,insolvency_type,notice_date,ip_name,ip_firm
+"""
+        records = self.service.parse_gazette_csv(csv_content)
+        assert len(records) == 0
+
+    def test_missing_columns(self):
+        """Test parsing CSV with missing optional columns."""
+        csv_content = b"""company_name,insolvency_type
+Acme Ltd,Liquidation
+"""
+        records = self.service.parse_gazette_csv(csv_content)
+        assert len(records) == 1
+        assert records[0].company_name == "Acme Ltd"
+        assert records[0].insolvency_type == "Liquidation"
+        assert records[0].notice_date is None
+        assert records[0].ip_name is None

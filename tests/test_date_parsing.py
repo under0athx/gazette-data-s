@@ -76,3 +76,27 @@ class TestDateParsing:
         result = _parse_date("2024")
         # Could be None or Jan 1 2024 depending on dateutil behavior
         assert result is None or result.year == 2024
+
+    def test_na_values_return_none(self):
+        """Test that n/a and similar values return None."""
+        assert _parse_date("n/a") is None
+        assert _parse_date("N/A") is None
+        assert _parse_date("na") is None
+        assert _parse_date("none") is None
+        assert _parse_date("None") is None
+        assert _parse_date("-") is None
+
+    def test_placeholder_values_return_none(self):
+        """Test that placeholder values return None."""
+        assert _parse_date("tbc") is None
+        assert _parse_date("TBC") is None
+        assert _parse_date("tbd") is None
+        assert _parse_date("TBD") is None
+        assert _parse_date("unknown") is None
+        assert _parse_date("Unknown") is None
+
+    def test_partial_date_with_leading_zeros(self):
+        """Test partial date with leading zeros returns None."""
+        assert _parse_date("2024-01") is None
+        assert _parse_date("2024-1") is None
+        assert _parse_date("2024-12") is None
