@@ -7,6 +7,7 @@ from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from src.db.models import GazetteRecord
 from src.graph.state import EnrichmentState
@@ -120,8 +121,8 @@ class TestEnrichmentWorkflowIntegration:
         with patch("src.graph.nodes._get_llm") as mock:
             llm = MagicMock()
             # Return high-confidence match for second company
-            response = MagicMock()
-            response.content = '{"index": 0, "confidence": 90}'
+            # Use proper AIMessage to work with add_messages
+            response = AIMessage(content='{"index": 0, "confidence": 90}')
             llm.invoke.return_value = response
             mock.return_value = llm
             yield llm
@@ -185,10 +186,14 @@ class TestEnrichmentWorkflowIntegration:
         self,
         mock_env,
         mock_companies_house,
-        mock_llm,
     ):
         """Test that companies without properties are not included."""
-        with patch("src.graph.nodes.get_connection") as mock:
+        with patch("src.graph.nodes._get_llm") as mock_llm_patch, \
+             patch("src.graph.nodes.get_connection") as mock:
+            # Setup LLM mock with proper AIMessage
+            llm = MagicMock()
+            llm.invoke.return_value = AIMessage(content='{"index": 0, "confidence": 90}')
+            mock_llm_patch.return_value = llm
             conn = MagicMock()
             cursor = MagicMock()
             # No properties found
@@ -234,9 +239,8 @@ class TestEnrichmentWorkflowIntegration:
         """Test that low confidence matches are tracked in failed_records."""
         with patch("src.graph.nodes._get_llm") as mock:
             llm = MagicMock()
-            # Return low-confidence match
-            response = MagicMock()
-            response.content = '{"index": 0, "confidence": 50}'
+            # Return low-confidence match with proper AIMessage
+            response = AIMessage(content='{"index": 0, "confidence": 50}')
             llm.invoke.return_value = response
             mock.return_value = llm
 

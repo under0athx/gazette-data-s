@@ -132,7 +132,7 @@ class TestConfigValidation:
             _env_file=None,
         )
 
-        assert config.llm_model == "claude-sonnet-4-20250514"
+        assert config.llm_model == "claude-sonnet-4-5"
 
     def test_llm_model_can_be_overridden(self):
         """Test that LLM model can be set via parameter."""
